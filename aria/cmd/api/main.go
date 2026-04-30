@@ -2,18 +2,23 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/Deonkar/Aria/aria/internal/auth"
 	"github.com/Deonkar/Aria/aria/internal/cache"
 	"github.com/Deonkar/Aria/aria/internal/config"
 	"github.com/Deonkar/Aria/aria/internal/db"
+	"github.com/Deonkar/Aria/aria/internal/httpx"
+	"github.com/Deonkar/Aria/aria/internal/logging"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -41,6 +46,7 @@ func main() {
 		log.Fatal().Err(err).Msg("readonly database connection failed")
 	}
 	defer roPool.Close()
+	_ = roPool // wired in later phases (AI query execution)
 
 	rdb, err := cache.NewClient(cfg.RedisURL)
 	if err != nil {
@@ -50,20 +56,42 @@ func main() {
 		_ = rdb.Close()
 	}()
 
-	fmt.Println("aria starting")
+	userRepo := db.NewUserRepo(pool)
+	oauthCfg := auth.GoogleConfig(cfg)
+	secureCookie := strings.HasPrefix(strings.ToLower(cfg.GoogleRedirectURL), "https://")
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+	r := chi.NewRouter()
+	r.Use(middleware.Recoverer)
+	r.Use(logging.RequestLogger)
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{cfg.FrontendOrigin},
+		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"status": "ok",
 			"time":   time.Now().UTC().Format(time.RFC3339Nano),
 		})
 	})
 
+	// Public auth routes
+	r.Get("/auth/google", auth.HandleGoogleLogin(oauthCfg, rdb))
+	r.Get("/auth/callback", auth.HandleGoogleCallback(oauthCfg, userRepo, rdb, cfg))
+	r.Post("/auth/refresh", auth.HandleRefresh(userRepo, rdb, cfg))
+
+	// Protected routes
+	r.Group(func(pr chi.Router) {
+		pr.Use(auth.Authenticate(cfg.JWTSecret, rdb))
+		pr.Post("/auth/logout", auth.HandleLogout(rdb, secureCookie))
+	})
+
 	srv := &http.Server{
 		Addr:              ":8080",
-		Handler:           mux,
+		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
