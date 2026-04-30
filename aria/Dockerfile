@@ -2,7 +2,7 @@ FROM golang:1.22-alpine AS build
 
 WORKDIR /app
 
-COPY aria/go.mod ./
+COPY aria/go.mod aria/go.sum ./
 RUN go mod download
 
 COPY aria/ ./
