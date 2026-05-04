@@ -38,12 +38,18 @@ func (h *QueryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if strings.TrimSpace(body.Question) == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "question required")
+	q, err := NormalizeQuestion(body.Question)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	sid := strings.TrimSpace(body.SessionID)
-	if sid == "" {
+	if sid != "" {
+		if err := ValidateSessionUUID(sid); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
 		sid = uuid.NewString()
 	}
 
@@ -54,7 +60,7 @@ func (h *QueryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := ai.QueryRequest{
-		Question:  body.Question,
+		Question:  q,
 		SessionID: sid,
 		AgentID:   claims.Subject,
 		AgentRole: claims.Role,

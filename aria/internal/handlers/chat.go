@@ -47,13 +47,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	q := strings.TrimSpace(body.Question)
-	if q == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "question required")
-		return
-	}
-	if len(q) > 500 {
-		httpx.WriteError(w, http.StatusBadRequest, "question too long")
+	q, err := NormalizeQuestion(body.Question)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

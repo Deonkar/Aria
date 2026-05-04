@@ -47,6 +47,10 @@ func InjectAgentFilter(sql, agentID, role string) (string, error) {
 
 	s := strings.TrimSpace(sql)
 	s = strings.TrimSuffix(s, ";")
+	// No FROM (scalar / noop SELECT): never append tenant filter — would be invalid SQL.
+	if !strings.Contains(strings.ToUpper(s), "FROM") {
+		return s, nil
+	}
 	orig := s
 	hasPlaceholder := strings.Contains(orig, ":agent_id")
 	s = strings.ReplaceAll(s, ":agent_id", "$1")

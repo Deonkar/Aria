@@ -4,12 +4,109 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Deonkar/Aria/aria/internal/config"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
 )
+
+var (
+	selectFromTextRe   = regexp.MustCompile(`(?is)\bselect\b[\s\S]*?;`)
+	fencedSelectPrefix = regexp.MustCompile(`(?i)^\s*select\b`)
+)
+
+func parseToolCallArgsJSON(arguments string) (sql, explanation string, err error) {
+	var args struct {
+		SQL         string `json:"sql"`
+		Explanation string `json:"explanation"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(args.SQL), strings.TrimSpace(args.Explanation), nil
+}
+
+// tryParseAssistantSQL handles normal tool_calls, legacy function_call, and plain-text
+// SELECT…; fallbacks (some OpenAI-compatible proxies omit tool_calls in the response).
+func tryParseAssistantSQL(msg openai.ChatCompletionMessage) (sql, explanation string, ok bool) {
+	for _, tc := range msg.ToolCalls {
+		if tc.Function.Name != "query_crm_database" {
+			continue
+		}
+		s, e, err := parseToolCallArgsJSON(tc.Function.Arguments)
+		if err != nil || s == "" {
+			continue
+		}
+		return s, e, true
+	}
+	if msg.FunctionCall.Name == "query_crm_database" && msg.FunctionCall.Arguments != "" {
+		if s, e, err := parseToolCallArgsJSON(msg.FunctionCall.Arguments); err == nil && s != "" {
+			return s, e, true
+		}
+	}
+	if s, ok2 := extractSelectStatementFromText(msg.Content); ok2 {
+		e := strings.TrimSpace(strings.Replace(msg.Content, s, "", 1))
+		return s, e, true
+	}
+	return "", "", false
+}
+
+func extractSelectStatementFromText(content string) (sql string, ok bool) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", false
+	}
+	if s := extractFencedSelect(content); s != "" {
+		return s, true
+	}
+	m := strings.TrimSpace(selectFromTextRe.FindString(content))
+	if m == "" {
+		// Models often omit ';' before a blank line (e.g. "SELECT 1 WHERE false\n\nI can't help…").
+		upper := strings.ToLower(content)
+		idx := strings.Index(upper, "select")
+		if idx < 0 {
+			return "", false
+		}
+		rest := strings.TrimSpace(content[idx:])
+		if cut := strings.Index(rest, "\n\n"); cut >= 0 {
+			rest = strings.TrimSpace(rest[:cut])
+		}
+		if rest == "" || !fencedSelectPrefix.MatchString(rest) {
+			return "", false
+		}
+		if !strings.HasSuffix(rest, ";") {
+			rest += ";"
+		}
+		m = rest
+	}
+	return m, true
+}
+
+func extractFencedSelect(content string) string {
+	idx := strings.Index(content, "```")
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx+3:]
+	rest = strings.TrimLeft(rest, "\r\n")
+	if strings.HasPrefix(strings.ToLower(rest), "sql") {
+		rest = strings.TrimSpace(rest[3:])
+	}
+	end := strings.Index(rest, "```")
+	if end < 0 {
+		return ""
+	}
+	inner := strings.TrimSpace(rest[:end])
+	if !fencedSelectPrefix.MatchString(inner) {
+		return ""
+	}
+	if !strings.HasSuffix(strings.TrimSpace(inner), ";") {
+		inner = strings.TrimSpace(inner) + ";"
+	}
+	return inner
+}
 
 func buildSQLSystemPrompt(req QueryRequest, schemaBlock, examplesBlock, historyBlock string) string {
 	adminNote := ""
@@ -39,8 +136,9 @@ DATA ACCESS RULES:
 CONVERSATION HISTORY:
 %s
 
-When the user asks a CRM question, you MUST call the tool query_crm_database with sql and explanation.
-If the question is not about CRM data (e.g. weather, math trivia), respond with a short helpful explanation in plain text and do NOT call the tool.`,
+You MUST call the tool query_crm_database on every turn (the API requires it).
+For normal CRM questions: pass a real SELECT and explanation.
+For questions outside CRM scope (weather, general knowledge, math trivia): use sql exactly "SELECT id FROM leads WHERE false AND assigned_agent_id = :agent_id" (returns 0 rows; keeps filters valid) and put the helpful refusal in the explanation field.`,
 		req.AgentID, req.AgentName, req.AgentRole, req.Timezone,
 		adminNote,
 		schemaBlock,
@@ -86,7 +184,10 @@ func GenerateSQL(ctx context.Context, client openai.Client, cfg *config.Config, 
 			openai.SystemMessage(system),
 			openai.UserMessage(user),
 		},
-		Tools:       toolParams(),
+		Tools: toolParams(),
+		ToolChoice: openai.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
+			openai.ChatCompletionNamedToolChoiceFunctionParam{Name: "query_crm_database"},
+		),
 		Temperature: param.NewOpt(0.1),
 	}
 
@@ -101,25 +202,14 @@ func GenerateSQL(ctx context.Context, client openai.Client, cfg *config.Config, 
 	completionTok = int(completion.Usage.CompletionTokens)
 
 	msg := completion.Choices[0].Message
-	if len(msg.ToolCalls) == 0 {
-		content := strings.TrimSpace(msg.Content)
+	if sql, expl, ok := tryParseAssistantSQL(msg); ok {
+		return sql, expl, promptTok, completionTok, nil
+	}
+	content := strings.TrimSpace(msg.Content)
+	if content != "" {
 		return "", content, promptTok, completionTok, ErrOutOfScope
 	}
-
-	for _, tc := range msg.ToolCalls {
-		if tc.Function.Name != "query_crm_database" {
-			continue
-		}
-		var args struct {
-			SQL         string `json:"sql"`
-			Explanation string `json:"explanation"`
-		}
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			return "", "", promptTok, completionTok, fmt.Errorf("tool args: %w", err)
-		}
-		return strings.TrimSpace(args.SQL), strings.TrimSpace(args.Explanation), promptTok, completionTok, nil
-	}
-	return "", strings.TrimSpace(msg.Content), promptTok, completionTok, fmt.Errorf("missing query_crm_database tool call")
+	return "", "", promptTok, completionTok, fmt.Errorf("missing assistant sql/tool output")
 }
 
 // GenerateSQLWithRetry adds one correction round after a failed execution.
@@ -134,7 +224,10 @@ func GenerateSQLWithRetry(ctx context.Context, client openai.Client, cfg *config
 			openai.UserMessage("User question:\n"+req.Question),
 			openai.UserMessage(fix),
 		},
-		Tools:       toolParams(),
+		Tools: toolParams(),
+		ToolChoice: openai.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
+			openai.ChatCompletionNamedToolChoiceFunctionParam{Name: "query_crm_database"},
+		),
 		Temperature: param.NewOpt(0.1),
 	}
 
@@ -148,21 +241,8 @@ func GenerateSQLWithRetry(ctx context.Context, client openai.Client, cfg *config
 	promptTok = int(completion.Usage.PromptTokens)
 	completionTok = int(completion.Usage.CompletionTokens)
 	msg := completion.Choices[0].Message
-	if len(msg.ToolCalls) == 0 {
-		return "", strings.TrimSpace(msg.Content), promptTok, completionTok, fmt.Errorf("no tool call on retry")
+	if sql, expl, ok := tryParseAssistantSQL(msg); ok {
+		return sql, expl, promptTok, completionTok, nil
 	}
-	for _, tc := range msg.ToolCalls {
-		if tc.Function.Name != "query_crm_database" {
-			continue
-		}
-		var args struct {
-			SQL         string `json:"sql"`
-			Explanation string `json:"explanation"`
-		}
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			return "", "", promptTok, completionTok, fmt.Errorf("tool args: %w", err)
-		}
-		return strings.TrimSpace(args.SQL), strings.TrimSpace(args.Explanation), promptTok, completionTok, nil
-	}
-	return "", "", promptTok, completionTok, fmt.Errorf("missing tool on retry")
+	return "", strings.TrimSpace(msg.Content), promptTok, completionTok, fmt.Errorf("no tool call on retry")
 }

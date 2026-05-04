@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/openai/openai-go"
 	"github.com/pgvector/pgvector-go"
+	"github.com/rs/zerolog/log"
 )
 
 type SchemaDoc struct {
@@ -41,7 +42,8 @@ func RetrieveRelevantSchema(ctx context.Context, readPool *pgxpool.Pool, client 
 	}
 	vec, _, _, err := EmbedText(ctx, client, embedModel, question)
 	if err != nil {
-		return nil, err
+		log.Warn().Err(err).Msg("schema retrieval: embedding API failed, skipping pgvector similarity (use information_schema fallback)")
+		return nil, nil
 	}
 	pgvec := pgvector.NewVector(vec)
 	rows, err := readPool.Query(ctx, `
@@ -80,7 +82,8 @@ func RetrieveIntentExamples(ctx context.Context, readPool *pgxpool.Pool, client 
 	}
 	vec, _, _, err := EmbedText(ctx, client, embedModel, question)
 	if err != nil {
-		return nil, err
+		log.Warn().Err(err).Msg("intent examples: embedding API failed, skipping similarity search")
+		return nil, nil
 	}
 	pgvec := pgvector.NewVector(vec)
 	rows, err := readPool.Query(ctx, `
