@@ -14,6 +14,10 @@ type Config struct {
 	RedisURL            string
 	JWTSecret           string
 	OpenAIAPIKey        string
+	OpenAIBaseURL       string
+	OpenAIChatModel     string
+	OpenAIEmbedModel    string
+	OpenAIAPIKeyHeader  string
 	GoogleClientID      string
 	GoogleClientSecret  string
 	GoogleRedirectURL   string
@@ -30,10 +34,20 @@ func Load() (*Config, error) {
 		RedisURL:            strings.TrimSpace(os.Getenv("REDIS_URL")),
 		JWTSecret:           strings.TrimSpace(os.Getenv("JWT_SECRET")),
 		OpenAIAPIKey:        strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		OpenAIBaseURL:       strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")),
+		OpenAIChatModel:     strings.TrimSpace(os.Getenv("OPENAI_CHAT_MODEL")),
+		OpenAIEmbedModel:    strings.TrimSpace(os.Getenv("OPENAI_EMBED_MODEL")),
+		OpenAIAPIKeyHeader:  strings.TrimSpace(os.Getenv("OPENAI_API_KEY_HEADER")),
 		GoogleClientID:      strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
 		GoogleClientSecret:  strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET")),
 		GoogleRedirectURL:   strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URL")),
 		FrontendOrigin:      strings.TrimSpace(os.Getenv("FRONTEND_ORIGIN")),
+	}
+	if cfg.OpenAIChatModel == "" {
+		cfg.OpenAIChatModel = "gpt-4o"
+	}
+	if cfg.OpenAIEmbedModel == "" {
+		cfg.OpenAIEmbedModel = "text-embedding-3-small"
 	}
 
 	var missing []string
@@ -54,6 +68,10 @@ func Load() (*Config, error) {
 
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
+	}
+
+	if cfg.FrontendOrigin == "" {
+		cfg.FrontendOrigin = "http://localhost:3000"
 	}
 
 	return cfg, nil

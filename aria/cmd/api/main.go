@@ -10,10 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Deonkar/Aria/aria/internal/ai"
 	"github.com/Deonkar/Aria/aria/internal/auth"
 	"github.com/Deonkar/Aria/aria/internal/cache"
 	"github.com/Deonkar/Aria/aria/internal/config"
 	"github.com/Deonkar/Aria/aria/internal/db"
+	"github.com/Deonkar/Aria/aria/internal/handlers"
 	"github.com/Deonkar/Aria/aria/internal/httpx"
 	"github.com/Deonkar/Aria/aria/internal/logging"
 	"github.com/go-chi/chi/v5"
@@ -25,7 +27,7 @@ import (
 
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
+	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -46,7 +48,6 @@ func main() {
 		log.Fatal().Err(err).Msg("readonly database connection failed")
 	}
 	defer roPool.Close()
-	_ = roPool // wired in later phases (AI query execution)
 
 	rdb, err := cache.NewClient(cfg.RedisURL)
 	if err != nil {
@@ -57,8 +58,29 @@ func main() {
 	}()
 
 	userRepo := db.NewUserRepo(pool)
+	convRepo := db.NewConversationRepo(pool)
+	oai := ai.NewOpenAIClient(cfg)
+	querySvc := ai.NewQueryService(cfg, oai, roPool, rdb)
+
 	oauthCfg := auth.GoogleConfig(cfg)
 	secureCookie := strings.HasPrefix(strings.ToLower(cfg.GoogleRedirectURL), "https://")
+
+	chatH := &handlers.ChatHandler{
+		UserRepo: userRepo,
+		ConvRepo: convRepo,
+		QuerySvc: querySvc,
+		RDB:      rdb,
+	}
+	convH := &handlers.ConversationsHandler{ConvRepo: convRepo, RDB: rdb}
+	feedbackH := &handlers.FeedbackHandler{
+		Pool:       pool,
+		ConvRepo:   convRepo,
+		RDB:        rdb,
+		OA:         oai,
+		EmbedModel: cfg.OpenAIEmbedModel,
+	}
+	adminH := &handlers.AdminHandler{Pool: pool}
+	queryH := &handlers.QueryHandler{UserRepo: userRepo, QuerySvc: querySvc}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -78,15 +100,23 @@ func main() {
 		})
 	})
 
-	// Public auth routes
 	r.Get("/auth/google", auth.HandleGoogleLogin(oauthCfg, rdb))
 	r.Get("/auth/callback", auth.HandleGoogleCallback(oauthCfg, userRepo, rdb, cfg))
 	r.Post("/auth/refresh", auth.HandleRefresh(userRepo, rdb, cfg))
 
-	// Protected routes
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.Authenticate(cfg.JWTSecret, rdb))
 		pr.Post("/auth/logout", auth.HandleLogout(rdb, secureCookie))
+
+		pr.Post("/chat", chatH.ServeHTTP)
+		pr.Post("/query", queryH.ServeHTTP)
+
+		pr.Get("/conversations", convH.List)
+		pr.Get("/conversations/{id}/messages", convH.ListMessages)
+		pr.Delete("/conversations/{id}", convH.Delete)
+
+		pr.Post("/messages/{id}/feedback", feedbackH.ServeHTTP)
+		pr.Get("/admin/metrics", adminH.Metrics)
 	})
 
 	srv := &http.Server{
@@ -110,4 +140,3 @@ func main() {
 		log.Fatal().Err(err).Msg("http server failed")
 	}
 }
-
