@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,8 +48,13 @@ func HandleGoogleLogin(oauthCfg *oauth2.Config, rdb *redis.Client) http.HandlerF
 			return
 		}
 
+		mode := "browser"
+		if r.URL.Query().Get("popup") == "1" {
+			mode = "popup"
+		}
+
 		key := "oauth_state:" + state
-		if err := rdb.Set(r.Context(), key, "1", 10*time.Minute).Err(); err != nil {
+		if err := rdb.Set(r.Context(), key, mode, 10*time.Minute).Err(); err != nil {
 			httpx.WriteError(w, http.StatusInternalServerError, "failed to start login")
 			return
 		}
@@ -73,16 +79,17 @@ func HandleGoogleCallback(
 		}
 
 		stateKey := "oauth_state:" + state
-		ok, err := rdb.Exists(r.Context(), stateKey).Result()
+		oauthMode, err := rdb.Get(r.Context(), stateKey).Result()
+		if err == redis.Nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid state")
+			return
+		}
 		if err != nil {
 			httpx.WriteError(w, http.StatusInternalServerError, "oauth state check failed")
 			return
 		}
-		if ok == 0 {
-			httpx.WriteError(w, http.StatusBadRequest, "invalid state")
-			return
-		}
 		_ = rdb.Del(r.Context(), stateKey).Err()
+		popupOAuth := strings.TrimSpace(oauthMode) == "popup"
 
 		tok, err := oauthCfg.Exchange(r.Context(), code)
 		if err != nil {
@@ -141,7 +148,7 @@ func HandleGoogleCallback(
 
 		setRefreshCookie(w, refreshToken, shouldSecureCookie(cfg))
 
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		payload := map[string]any{
 			"access_token": accessToken,
 			"user": map[string]any{
 				"id":         user.ID,
@@ -150,8 +157,51 @@ func HandleGoogleCallback(
 				"avatar_url": user.AvatarURL,
 				"role":       user.Role,
 			},
-		})
+		}
+
+		if popupOAuth {
+			writeOAuthPopupPage(w, cfg, payload)
+			return
+		}
+
+		httpx.WriteJSON(w, http.StatusOK, payload)
 	}
+}
+
+// writeOAuthPopupPage returns HTML that posts the token to the SPA opener (postMessage).
+func writeOAuthPopupPage(w http.ResponseWriter, cfg *config.Config, payload map[string]any) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "encode response")
+		return
+	}
+	targetOrigin := strings.TrimSpace(cfg.FrontendOrigin)
+	if targetOrigin == "" {
+		targetOrigin = "http://localhost:3000"
+	}
+	b64 := base64.StdEncoding.EncodeToString(b)
+	html := `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Signed in</title></head><body>
+<script>
+(function(){
+  var b64 = ` + strconv.Quote(b64) + `;
+  var target = ` + strconv.Quote(targetOrigin) + `;
+  try {
+    var data = JSON.parse(atob(b64));
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({ source: 'aria-oauth', payload: data }, target);
+      window.close();
+    } else {
+      document.body.innerHTML = '<pre style="font-family:monospace;padding:1rem">' + JSON.stringify(data, null, 2) + '</pre>';
+    }
+  } catch (e) {
+    document.body.textContent = 'Login succeeded but could not notify the app. Close this window and paste the token manually.';
+  }
+})();
+</script>
+<p style="font-family:system-ui;padding:1rem">Completing sign-in…</p>
+</body></html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(html))
 }
 
 func HandleRefresh(userRepo *db.UserRepo, rdb *redis.Client, cfg *config.Config) http.HandlerFunc {

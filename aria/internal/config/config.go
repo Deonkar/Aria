@@ -22,6 +22,9 @@ type Config struct {
 	GoogleClientSecret  string
 	GoogleRedirectURL   string
 	FrontendOrigin      string
+	// AllowDemoAuth enables POST /auth/demo-token (never enable in production).
+	AllowDemoAuth bool
+	DemoUserID    string
 }
 
 func Load() (*Config, error) {
@@ -72,6 +75,15 @@ func Load() (*Config, error) {
 
 	if cfg.FrontendOrigin == "" {
 		cfg.FrontendOrigin = "http://localhost:3000"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ALLOW_DEMO_AUTH"))) {
+	case "1", "true", "yes", "on":
+		cfg.AllowDemoAuth = true
+	}
+	cfg.DemoUserID = strings.TrimSpace(os.Getenv("DEMO_USER_ID"))
+	if cfg.DemoUserID == "" {
+		cfg.DemoUserID = "10000000-0000-0000-0000-000000000001"
 	}
 
 	return cfg, nil

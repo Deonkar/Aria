@@ -103,6 +103,7 @@ func main() {
 	r.Get("/auth/google", auth.HandleGoogleLogin(oauthCfg, rdb))
 	r.Get("/auth/callback", auth.HandleGoogleCallback(oauthCfg, userRepo, rdb, cfg))
 	r.Post("/auth/refresh", auth.HandleRefresh(userRepo, rdb, cfg))
+	r.Post("/auth/demo-token", auth.HandleDemoToken(userRepo, cfg))
 
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.Authenticate(cfg.JWTSecret, rdb))
