@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package aria.v1;
+
+option go_package = "github.com/Deonkar/Aria/aria/gen/aria/v1;ariav1";
+
+service AIQueryService {
+  // Unary RPC — returns complete answer in one response.
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Server-streaming RPC — streams SQL, tokens, then final metadata.
+  rpc StreamQuery(QueryRequest) returns (stream QueryChunk);
+}
+
+message QueryRequest {
+  string question   = 1;
+  string agent_id   = 2;
+  string agent_role = 3; // "agent" or "admin"
+  string agent_name = 4;
+  string session_id = 5;
+  string timezone   = 6;
+}
+
+message QueryResponse {
+  string answer        = 1;
+  string generated_sql = 2;
+  int32  row_count     = 3;
+  int32  execution_ms  = 4;
+  bool   was_cached    = 5;
+  bool   was_corrected = 6;
+  int32  tokens_input  = 7;
+  int32  tokens_output = 8;
+}
+
+message QueryChunk {
+  enum ChunkType {
+    CHUNK_TYPE_UNSPECIFIED = 0;
+    CHUNK_TYPE_SQL         = 1; // The generated/executed SQL — arrives first when available.
+    CHUNK_TYPE_TOKEN       = 2; // A streamed LLM token.
+    CHUNK_TYPE_DONE        = 3; // Final metadata.
+    CHUNK_TYPE_ERROR       = 4; // Error occurred (safe message).
+  }
+
+  ChunkType type      = 1;
+  string    text      = 2; // Token text (TOKEN) or SQL text (SQL).
+  string    message_id = 3; // Reserved for future use (parity with SSE).
+  int32     row_count  = 4; // Populated in DONE.
+  bool      cached     = 5; // Populated in DONE.
+  string    error      = 6; // Populated in ERROR.
+}
+
