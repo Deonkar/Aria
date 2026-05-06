@@ -33,6 +33,8 @@ func NewQueryService(cfg *config.Config, client openai.Client, readPool *pgxpool
 
 func (s *QueryService) Cfg() *config.Config { return s.cfg }
 
+func (s *QueryService) RDB() *redis.Client { return s.rdb }
+
 func (s *QueryService) historyBlock(ctx context.Context, req QueryRequest) string {
 	hist, err := cache.GetHistory(ctx, s.rdb, req.AgentID, req.SessionID)
 	if err != nil {

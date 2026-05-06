@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,11 +11,13 @@ import (
 	"syscall"
 	"time"
 
+	ariav1 "github.com/Deonkar/Aria/aria/gen/aria/v1"
 	"github.com/Deonkar/Aria/aria/internal/ai"
 	"github.com/Deonkar/Aria/aria/internal/auth"
 	"github.com/Deonkar/Aria/aria/internal/cache"
 	"github.com/Deonkar/Aria/aria/internal/config"
 	"github.com/Deonkar/Aria/aria/internal/db"
+	grpcserver "github.com/Deonkar/Aria/aria/internal/grpc"
 	"github.com/Deonkar/Aria/aria/internal/handlers"
 	"github.com/Deonkar/Aria/aria/internal/httpx"
 	"github.com/Deonkar/Aria/aria/internal/logging"
@@ -23,6 +26,8 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 func main() {
@@ -82,6 +87,17 @@ func main() {
 	adminH := &handlers.AdminHandler{Pool: pool}
 	queryH := &handlers.QueryHandler{UserRepo: userRepo, QuerySvc: querySvc}
 
+	grpcSrv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpcserver.RecoveryUnaryInterceptor, grpcserver.LoggingUnaryInterceptor),
+		grpc.ChainStreamInterceptor(grpcserver.LoggingStreamInterceptor),
+	)
+	ariav1.RegisterAIQueryServiceServer(grpcSrv, grpcserver.NewServer(querySvc))
+	reflection.Register(grpcSrv)
+	grpcLis, err := net.Listen("tcp", ":9090")
+	if err != nil {
+		log.Fatal().Err(err).Msg("grpc listen failed")
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(logging.RequestLogger)
@@ -130,8 +146,16 @@ func main() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		go grpcSrv.GracefulStop()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Error().Err(err).Msg("http server shutdown error")
+		}
+	}()
+
+	go func() {
+		log.Info().Str("addr", ":9090").Msg("grpc server starting")
+		if err := grpcSrv.Serve(grpcLis); err != nil {
+			log.Fatal().Err(err).Msg("grpc server failed")
 		}
 	}()
 
