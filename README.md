@@ -2,6 +2,12 @@
 
 Aria CRM is a **student-housing style CRM** with a **Go API** and **Next.js** web app. The standout feature is an **AI assistant** that answers questions by generating and running **read-only SQL** against your live Postgres database (leads, tasks, bookings, partners, properties, and related tables), streaming results over **SSE** chat.
 
+## Architecture
+
+![Aria architecture](docs/architecture.svg)
+
+The model never touches a writable connection. It sees schema metadata only, and the SQL it generates runs through a read-only execution path, so a bad generation returns an error rather than mutating data.
+
 ## Repository layout
 
 | Path | Purpose |
